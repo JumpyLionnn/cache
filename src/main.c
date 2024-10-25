@@ -18,25 +18,30 @@ int main() {
     // printf("page size: %zu\n", m.page_size);
 
     Allocator all = allocator_create(4 * MB);
-
-    struct Dummy* vector = alloc(&all, sizeof(struct Dummy) * 16);
+    
+    size_t count = 10;
+    char** vector = alloc(&all, sizeof(char*) * count);
     assert(vector != NULL); 
 
-
-
-    vector[0].a = 10;
-    vector[0].b = -4;
-    vector[0].c = 1.2f;
-
-
-    vector[15].a = 15;
-    vector[15].b = -15;
-    vector[15].c = 1.15f;
+    for (size_t i = 0; i < count; i++) {
+        vector[i] = (char*)alloc(&all, i + 1);
+    }
 
     dump_nodes(&all);
+    printf("-----\n");
+    
+    for (size_t i = 1; i < count; i += 2) {
+        mem_free(&all, vector[i]);
+    }
+
+    dump_nodes(&all);
+    printf("-----\n");
+
+        mem_free(&all, vector[2]);
+
+    dump_nodes(&all);
+    printf("-----\n");
 
     mem_free(&all, vector);
-    printf("-----\n");
-    dump_nodes(&all);
     return 0;
 }

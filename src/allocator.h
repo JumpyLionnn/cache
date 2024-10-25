@@ -1,13 +1,18 @@
 #ifndef ALLOCATOR_H
 #define ALLOCATOR_H
 #include <stddef.h>
-
+#include <assert.h>
 
 #define KB (1024)
 #define MB (KB * 1024)
 #define GB (MB * 1024)
 
+
+#define alignof _Alignof
+
 #define MIN_ALLOCATION_SIZE sizeof(void*)
+
+#define ALLOCATION_ALIGNMENT alignof(void*)
 
 typedef struct NodeHeader NodeHeader;
 struct NodeHeader {
@@ -16,11 +21,12 @@ struct NodeHeader {
     int free;
     NodeHeader* next;
 };
+static_assert(sizeof(NodeHeader) % ALLOCATION_ALIGNMENT == 0);
 
 typedef struct NodeFooter {
     size_t size;
 } NodeFooter;
-
+static_assert(sizeof(NodeFooter) % ALLOCATION_ALIGNMENT == 0);
 
 typedef struct Allocator {
     NodeHeader* first_free;

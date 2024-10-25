@@ -33,7 +33,7 @@ NodeHeader* first_fit(Allocator* allocator, size_t size, NodeHeader** out_previo
         node = node->next;
     }
     *out_previous = previous;
-    return NULL;
+    return node;
 }
 
 void make_node_allocated(Allocator* allocator, NodeHeader* header) {
@@ -41,16 +41,29 @@ void make_node_allocated(Allocator* allocator, NodeHeader* header) {
     assert(allocator != NULL);
     header->free = 0;
     
-    if (header == allocator->first_free) {
+    if (header < allocator->first_allocated) {
         header->next = allocator->first_allocated;
         allocator->first_allocated = header;
+    }
+    else if (allocator->first_allocated == NULL) {
+        allocator->first_allocated = header;
+        allocator->last_allocated = header;
     }
     else {
         NodeFooter* previous_footer = (NodeFooter*)((char*)header - sizeof(NodeFooter));
         NodeHeader* previous_header = (NodeHeader*)((char*)previous_footer - sizeof(NodeHeader) - previous_footer->size);
+        assert(previous_header->free == 0);
         header->next = previous_header->next;
         previous_header->next = header;
     }
+}
+
+size_t ceil_to_power_of_two_multiplies(size_t value, size_t power_of_two) {
+    size_t page_size_mask = power_of_two - 1;
+    if ((value & page_size_mask) != 0) { 
+        value = (value | page_size_mask) + 1;
+    }
+    return value;
 }
 
 NodeHeader* expand_memory_area_by(Allocator* allocator, size_t size) {
@@ -69,13 +82,8 @@ NodeHeader* expand_memory_area_by(Allocator* allocator, size_t size) {
 
 
     // NOTE: assuming the page size if a power of 2
-    size_t total_size = additional_size;
-    size_t page_size_mask = allocator->page_size - 1;
-    if ((additional_size & page_size_mask) != 0) { 
-        total_size = (additional_size | page_size_mask) + 1;
-    }
+    size_t total_size = ceil_to_power_of_two_multiplies(additional_size, allocator->page_size);
 
-    // void* heap_start = mmap(NULL, max_size,PROT_WRITE | PROT_READ, MAP_PRIVATE | MAP_NORESERVE | MAP_ANONYMOUS, -1, 0);
     void* new_block = mmap(heap_end, total_size, PROT_WRITE | PROT_READ, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (new_block == (void*)-1) {
         return NULL;
@@ -103,62 +111,6 @@ NodeHeader* expand_memory_area_by(Allocator* allocator, size_t size) {
         return header;
     }
 }
-
-void* alloc(Allocator* allocator, size_t size) {
-    if (size == 0) {
-        return NULL;
-    }
-    NodeHeader* previous = NULL;
-    NodeHeader* block = first_fit(allocator, size, &previous);
-    size_t total_size = size + sizeof(NodeHeader) + sizeof(NodeFooter);
-    if (block == NULL) {
-        block = expand_memory_area_by(allocator, total_size);
-        if (block == NULL) {
-            printf("out of memory\n");
-            return NULL;
-        }
-    }
-    if (block->size >= total_size + MIN_ALLOCATION_SIZE) {
-        // can split successfully
-        size_t remaining_size = block->size - total_size; 
-
-        NodeFooter* new_footer = (NodeFooter*)((char*)block + sizeof(NodeHeader) + size);
-        NodeHeader* new_header = (NodeHeader*)((char*)new_footer + sizeof(NodeFooter));
-
-
-        new_footer->size = size;
-        new_header->size = remaining_size;
-        new_header->free = 1;
-        new_header->next = block->next;
-
-
-        NodeFooter* footer = (NodeFooter*)((char*)block + sizeof(NodeHeader) + block->size);
-        footer->size = remaining_size;
-
-
-        block->size = size;
-        make_node_allocated(allocator, block);
-        if (previous == NULL) {
-            allocator->first_free = new_header;
-            allocator->last_free = new_header;
-        }
-        else {
-            previous->next = new_header;
-        }
-
-        return (char*)block + sizeof(NodeHeader);
-    }
-    else {
-        // can't spit, need to use the whole block, even if there is a bit of padding
-
-        // removing it form the free blocks linked list
-        previous->next = block->next;
-
-        make_node_allocated(allocator, block);
-        return (char*)block + sizeof(NodeHeader);
-    }
-}
-
 NodeFooter* get_footer(NodeHeader* header) {
     return (NodeFooter*)((char*)header + header->size + sizeof(NodeHeader));
 }
@@ -188,13 +140,71 @@ NodeHeader* get_next_header(Allocator* allocator, NodeHeader* node) {
     }
 }
 
+void* alloc(Allocator* allocator, size_t size) {
+    if (size == 0) {
+        return NULL;
+    }
+    
+    size = ceil_to_power_of_two_multiplies(size, ALLOCATION_ALIGNMENT);
+
+    NodeHeader* previous_free = NULL;
+    NodeHeader* block = first_fit(allocator, size, &previous_free);
+    size_t total_size = size + sizeof(NodeHeader) + sizeof(NodeFooter);
+    if (block == NULL) {
+        block = expand_memory_area_by(allocator, total_size);
+        if (block == NULL) {
+            printf("out of memory\n");
+            return NULL;
+        }
+    }
+    if (block->size >= total_size + MIN_ALLOCATION_SIZE) {
+        // can split successfully
+        size_t remaining_size = block->size - total_size; 
+
+        NodeFooter* new_footer = (NodeFooter*)((char*)block + sizeof(NodeHeader) + size);
+        NodeHeader* new_header = (NodeHeader*)((char*)new_footer + sizeof(NodeFooter));
+
+
+        new_footer->size = size;
+        new_header->size = remaining_size;
+        new_header->free = 1;
+        new_header->next = block->next;
+
+
+        NodeFooter* footer = get_footer(block);
+        footer->size = remaining_size;
+
+
+        block->size = size;
+        make_node_allocated(allocator, block);
+        if (previous_free == NULL) {
+            allocator->first_free = new_header;
+        }
+        else {
+            previous_free->next = new_header;
+        }
+
+        return (char*)block + sizeof(NodeHeader);
+    }
+    else {
+        // can't spit, need to use the whole block, even if there is a bit of padding
+
+        // removing it form the free blocks linked list
+        previous_free->next = block->next;
+
+        make_node_allocated(allocator, block);
+        return (char*)block + sizeof(NodeHeader);
+    }
+}
+
+
 NodeHeader* find_previous_allocated_node(Allocator* allocator, NodeHeader* node) {
     NodeHeader* previous = get_previous_header(allocator, node);
     if (previous == NULL) {
         return NULL;
     }
     if (previous->free) {
-        previous = get_previous_header(allocator, node);
+        previous = get_previous_header(allocator, previous);
         assert(previous == NULL || previous->free == 0);
     }
     return previous;
@@ -204,33 +214,11 @@ NodeHeader* find_previous_allocated_node(Allocator* allocator, NodeHeader* node)
 NodeHeader* find_previous_free_node(Allocator* allocator, NodeHeader* node) {
     NodeHeader* previous = get_previous_header(allocator, node);
     while (previous != NULL && previous->free == 0) {
-        previous = get_previous_header(allocator, node);
+        previous = get_previous_header(allocator, previous);
     }
     return previous;
 }
 
-// NodeHeader* connect_with_previous(Allocator* allocator, NodeHeader* header) {
-//     NodeHeader* previous_header = get_previous_header(allocator, header);
-//     if (previous_header == NULL) {
-//         allocator->first_free = header;
-//     }
-//     else if (previous_header->free) {
-//         assert(previous_header->next == header);
-//         NodeFooter* footer = get_footer(header);
-//         size_t new_size = header->size + previous_header->size + sizeof(NodeFooter) + sizeof(NodeHeader);
-//         footer->size = new_size;
-//         previous_header->size = new_size;
-//
-//         previous_header->next = header->next;
-//         return previous_header;
-//     }
-//     return header;
-// }
-// NodeHeader* connect_with_next(Allocator* allocator, NodeHeader* header) {
-//
-//     return header;
-// }
-//
 void mem_free(Allocator* allocator, void* ptr) {
     assert(allocator != NULL);
     if (ptr == NULL) {
@@ -265,6 +253,7 @@ void mem_free(Allocator* allocator, void* ptr) {
             last_free->size = new_size;
             NodeFooter* new_footer = get_footer(header);
             new_footer->size = new_size;
+            header = last_free;
         }
         else {
             last_free->next = header;
@@ -277,18 +266,16 @@ void mem_free(Allocator* allocator, void* ptr) {
     }
     else {
         if (next_free == get_next_header(allocator, header)) {
+            NodeFooter* new_footer = get_footer(next_free);
             header->next = next_free->next;
             size_t new_size = header->size + next_free->size + sizeof(NodeHeader) + sizeof(NodeFooter);
             header->size = new_size;
-            NodeFooter* new_footer = get_footer(next_free);
             new_footer->size = new_size;
         }
         else {
             header->next = next_free;
         }
     }
-    // header = connect_with_previous(allocator, header);
-    // connect_with_next(allocator, header);
 }
 
 
@@ -296,15 +283,18 @@ void mem_free(Allocator* allocator, void* ptr) {
 void dump_nodes(Allocator* allocator) {
     char* heap_end = (char*)allocator->heap_start + allocator->heap_size;
     char* current = (char*)allocator->heap_start;
-
+    printf("first allocated: %p, first free: %p\n", (void*)allocator->first_allocated, (void*)allocator->first_free);
     while(current < heap_end) {
         NodeHeader* header = (NodeHeader*)current;
+        const char* label = "";
         if (header->free) {
-            printf("free node: %zu\n", header->size);
+            label = "free";
         }
         else {
-            printf("allocated node: %zu\n", header->size);
+            label = "allocated";
         }
+        printf("%p: %s node: %zu, next: %p\n", (void*)header, label, header->size, (void*)header->next);
         current = current + sizeof(NodeHeader) + sizeof(NodeFooter) + header->size;
     }
+    printf("last allocated: %p, last free: %p\n", (void*)allocator->last_allocated, (void*)allocator->last_free);
 }
